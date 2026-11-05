@@ -1,0 +1,7 @@
+{
+  "name": "news-tts-vercel",
+  "version": "1.0.0",
+  "description": "Natural Neural TTS for News Website on Vercel",
+  "main": "api/tts.js",
+  "dependencies": {}
+}
