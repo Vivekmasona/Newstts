@@ -1,5 +1,5 @@
 {
-  "name": "live-instant-radio",
+  "name": "cloud-247-radio",
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {
@@ -8,7 +8,7 @@
   "dependencies": {
     "express": "^4.19.2",
     "cors": "^2.8.5",
-    "ws": "^8.16.0"
+    "node-fetch": "^2.7.0"
   },
   "engines": {
     "node": ">=18.x"
