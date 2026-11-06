@@ -1,17 +1,20 @@
 const express = require('express');
+const multer = require('multer');
 const cors = require('cors');
-const http = require('http');
 const fetch = require('node-fetch');
+const FormData = require('form-data');
 
 const app = express();
-app.use(express.json());
 app.use(cors());
 
-// Default streaming URL (Aap koi bhi public mp3 link yahan set kar sakte hain)
-let currentAudioUrl = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3";
+const upload = multer({ storage: multer.memoryStorage() });
+
+// Default stream URL
+let activeAudioUrl = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3";
+let isProcessing = false;
 
 // -------------------------------------------------------------
-// 1. ADMIN PANEL (Yahan bas naya audio link daalna hai)
+// 1. ADMIN PANEL (Simple File Selection)
 // -------------------------------------------------------------
 app.get('/', (req, res) => {
     res.send(`
@@ -20,32 +23,34 @@ app.get('/', (req, res) => {
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>24/7 Cloud Radio Station</title>
+            <title>24/7 Auto-Cloud Radio Station</title>
             <style>
                 body { font-family: Arial, sans-serif; background: #0f172a; color: #f8fafc; text-align: center; padding: 30px; }
                 .card { background: #1e293b; padding: 25px; border-radius: 12px; display: inline-block; width: 100%; max-width: 420px; box-shadow: 0 10px 25px rgba(0,0,0,0.4); }
                 input, button { margin: 10px 0; padding: 12px; font-size: 15px; border-radius: 6px; border: none; width: 100%; box-sizing: border-box; }
-                input[type="text"] { background: #334155; color: white; border: 1px solid #475569; }
-                button { background: #3b82f6; color: white; cursor: pointer; font-weight: bold; }
-                button:hover { background: #2563eb; }
-                .status { margin-top: 15px; color: #22c55e; font-weight: bold; font-size: 14px; }
+                input[type="file"] { background: #334155; color: white; }
+                button { background: #22c55e; color: black; cursor: pointer; font-weight: bold; }
+                button:hover { background: #16a34a; }
+                .status { margin-top: 15px; color: #38bdf8; font-weight: bold; font-size: 14px; }
             </style>
         </head>
         <body>
             <div class="card">
-                <h2>🌐 24/7 Cloud FM Radio</h2>
-                <p style="font-size: 13px; color: #94a3b8;">Bina upload kiye direct URL se 24/7 chalao</p>
+                <h2>📻 24/7 Auto-Cloud FM</h2>
+                <p style="font-size: 13px; color: #94a3b8;">Phone se file chuno aur 24/7 broadcast karo</p>
                 
-                <form action="/set-url" method="POST">
-                    <input type="text" name="audioUrl" placeholder="Audio ka direct MP3 URL yahan dalein..." required><br>
-                    <button type="submit">Update 24/7 Stream</button>
+                <form action="/upload-local" method="POST" enctype="multipart/form-data">
+                    <input type="file" name="audio" accept="audio/*" required><br>
+                    <button type="submit">Convert to 24/7 Cloud Stream</button>
                 </form>
 
-                <div class="status">Status: 🟢 24/7 Server Running Active</div>
+                <div class="status">
+                    Status: ${isProcessing ? '⚡ Creating Cloud Bridge...' : '🟢 Radio Live 24/7'}
+                </div>
                 
                 <br><hr style="border: 0.5px solid #334155;"><br>
-                <h3 style="font-size: 14px;">Friend ka Permanent Listener URL:</h3>
-                <input type="text" value="${req.protocol}://${req.get('host')}/stream" readonly style="background: #0f172a; color: #38bdf8; text-align: center;">
+                <h3 style="font-size: 14px;">Friend ka Permanent Stream URL:</h3>
+                <input type="text" value="${req.protocol}://${req.get('host')}/stream" readonly style="background: #0f172a; color: #38bdf8; text-align: center; border: 1px solid #334155;">
             </div>
         </body>
         </html>
@@ -53,15 +58,45 @@ app.get('/', (req, res) => {
 });
 
 // -------------------------------------------------------------
-// 2. UPDATE STREAM URL ROUTE
+// 2. FILE SELECTION TO CLOUD BRIDGE ROUTE
 // -------------------------------------------------------------
-app.post('/set-url', (req, res) => {
-    const { audioUrl } = req.body;
-    if (audioUrl) {
-        currentAudioUrl = audioUrl;
-        console.log(`[Cloud Radio] Stream URL updated to: ${audioUrl}`);
+app.post('/upload-local', upload.single('audio'), async (req, res) => {
+    if (!req.file) {
+        return res.status(400).send('No file selected.');
     }
-    res.redirect('/');
+
+    try {
+        isProcessing = true;
+        console.log(`[Bridge Engine] Uploading ${req.file.originalname} to temporary cloud CDN...`);
+
+        // Free Fast CDN (catbox.moe / tmpfiles) par push karna direct MP3 URL ke liye
+        const form = new FormData();
+        form.append('fileToUpload', req.file.buffer, {
+            filename: req.file.originalname,
+            contentType: req.file.mimetype || 'audio/mpeg'
+        });
+        form.append('reqtype', 'fileupload');
+
+        const cdnRes = await fetch('https://catbox.moe/user/api.php', {
+            method: 'POST',
+            body: form
+        });
+
+        const cloudUrl = await cdnRes.text();
+
+        if (cloudUrl && cloudUrl.startsWith('http')) {
+            activeAudioUrl = cloudUrl.trim();
+            console.log(`[Bridge Engine Success] Direct Stream Link: ${activeAudioUrl}`);
+        } else {
+            console.error('[Bridge Error] Cloud response failed:', cloudUrl);
+        }
+
+    } catch (err) {
+        console.error('[Bridge Error]', err.message);
+    } finally {
+        isProcessing = false;
+        res.redirect('/');
+    }
 });
 
 // -------------------------------------------------------------
@@ -69,8 +104,7 @@ app.post('/set-url', (req, res) => {
 // -------------------------------------------------------------
 app.get('/stream', async (req, res) => {
     try {
-        // Server khud cloud se audio stream fetch karke listener ko relay karega
-        const response = await fetch(currentAudioUrl);
+        const response = await fetch(activeAudioUrl);
         
         if (!response.ok) {
             return res.status(404).send('Audio source not reachable.');
@@ -80,7 +114,6 @@ app.get('/stream', async (req, res) => {
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Cache-Control', 'no-cache');
 
-        // External stream ko pipe kar dena taಕಿ 24/7 bina ruke chalta rahe
         response.body.pipe(res);
 
         response.body.on('error', (err) => {
@@ -95,5 +128,5 @@ app.get('/stream', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`24/7 Cloud Radio running on port ${PORT}`);
+    console.log(`24/7 Auto-Cloud Radio Server running on port ${PORT}`);
 });
