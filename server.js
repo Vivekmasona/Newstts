@@ -1,37 +1,20 @@
 const express = require('express');
-const fs = require('fs');
+const http = require('http');
+const WebSocket = require('ws');
 const path = require('path');
 const cors = require('cors');
-const multer = require('multer');
 
 const app = express();
-app.use(express.json());
 app.use(cors());
 
-// Uploads folder setup
-const UPLOAD_DIR = path.join(__dirname, 'uploads');
-if (!fs.existsSync(UPLOAD_DIR)) {
-    fs.mkdirSync(UPLOAD_DIR);
-}
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
 
-// Multer configuration for audio upload
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        cb(null, UPLOAD_DIR);
-    },
-    filename: (req, file, cb) => {
-        // Hamesha unique ya standard naam dein taaki conflict na ho
-        const uniqueName = Date.now() + '-' + file.originalname;
-        cb(null, uniqueName);
-    }
-});
-const upload = multer({ storage: storage });
-
-// Current playing song track info
-let currentSongFile = null;
+// Active listeners ki list jo /stream par connected hain
+let listeners = [];
 
 // -------------------------------------------------------------
-// 1. ADMIN PANEL (Browser par khulte hi upload form dikhega)
+// 1. BROADCASTER PANEL (Yahan se aap audio chunks live bhejenge)
 // -------------------------------------------------------------
 app.get('/', (req, res) => {
     res.send(`
@@ -39,36 +22,75 @@ app.get('/', (req, res) => {
         <html lang="en">
         <head>
             <meta charset="UTF-8">
-            <title>FM Radio Admin Panel</title>
+            <title>Live Chunk Broadcaster Panel</title>
             <style>
-                body { font-family: Arial, sans-serif; background: #f4f4f9; text-align: center; padding: 50px; }
-                .card { background: white; padding: 30px; border-radius: 10px; display: inline-block; box-shadow: 0px 4px 10px rgba(0,0,0,0.1); }
-                input, button { margin: 10px 0; padding: 10px; font-size: 16px; }
-                button { background: #007BFF; color: white; border: none; border-radius: 5px; cursor: pointer; }
-                button:hover { background: #0056b3; }
-                .status { margin-top: 15px; color: green; font-weight: bold; }
+                body { font-family: Arial, sans-serif; background: #111; color: #fff; text-align: center; padding: 50px; }
+                .card { background: #222; padding: 30px; border-radius: 10px; display: inline-block; box-shadow: 0px 4px 15px rgba(0,255,0,0.2); }
+                input, button { margin: 10px 0; padding: 12px; font-size: 16px; }
+                button { background: #28a745; color: white; border: none; border-radius: 5px; cursor: pointer; }
+                button:hover { background: #218838; }
+                #status { font-weight: bold; margin-top: 15px; color: #ffc107; }
             </style>
         </head>
         <body>
             <div class="card">
-                <h2>📻 FM Radio Control Panel</h2>
-                <p>Naya gaana upload karein (Purana gaana apne aap delete ho jayega taaki storage full na ho)</p>
-                <form action="/upload" method="POST" enctype="multipart/form-data">
-                    <input type="file" name="audio" accept="audio/*" required><br>
-                    <button type="submit">Upload & Stream Now</button>
-                </form>
-                <div class="status">Current Playing: <span id="current">Loading...</span></div>
+                <h2>🎙️ Live Chunk Radio Station</h2>
+                <p>Audio select karein aur live chunk stream shuru karein (Zero Server Storage)</p>
+                <input type="file" id="audioFile" accept="audio/*"><br>
+                <button id="startBtn" onclick="startStreaming()">Start Live Stream</button>
+                <div id="status">Status: Disconnected</div>
                 <br>
-                <h3>Friend ke liye Stream URL:</h3>
-                <input type="text" value="${req.protocol}://${req.get('host')}/stream" readonly style="width: 100%; text-align: center;">
+                <h3>Friend ka Listener URL:</h3>
+                <input type="text" value="${req.protocol}://${req.get('host')}/stream" readonly style="width: 100%; text-align: center; background: #333; color: #fff; border: 1px solid #444;">
             </div>
 
             <script>
-                fetch('/status')
-                    .then(res => res.json())
-                    .then(data => {
-                        document.getElementById('current').innerText = data.song || 'Koi gaana nahi chal raha';
-                    });
+                let ws;
+                function connectWebSocket() {
+                    const protocol = location.protocol === 'https:' ? 'wss://' : 'ws://';
+                    ws = new WebSocket(protocol + location.host);
+                    
+                    ws.onopen = () => document.getElementById('status').innerText = "Status: Connected to Server (Ready)";
+                    ws.onclose = () => {
+                        document.getElementById('status').innerText = "Status: Disconnected. Reconnecting...";
+                        setTimeout(connectWebSocket, 2000);
+                    };
+                }
+                connectWebSocket();
+
+                function startStreaming() {
+                    const fileInput = document.getElementById('audioFile');
+                    if (fileInput.files.length === 0) {
+                        alert("Pehle koi audio file select karein!");
+                        return;
+                    }
+
+                    const file = fileInput.files[0];
+                    const CHUNK_SIZE = 64 * 1024; // 64 KB ka chunk
+                    let offset = 0;
+
+                    document.getElementById('status').innerText = "Status: Streaming Live Chunks...";
+                    
+                    const readerStream = setInterval(() => {
+                        if (offset >= file.size) {
+                            clearInterval(readerStream);
+                            document.getElementById('status').innerText = "Status: Stream Finished!";
+                            return;
+                        }
+
+                        const slice = file.slice(offset, offset + CHUNK_SIZE);
+                        const fileReader = new FileReader();
+                        
+                        fileReader.onload = function(event) {
+                            if (ws.readyState === WebSocket.OPEN) {
+                                ws.send(event.target.result); // ArrayBuffer chunk bhej rahe hain
+                            }
+                        };
+                        fileReader.readAsArrayBuffer(slice);
+                        offset += CHUNK_SIZE;
+
+                    }, 200); // Har 200ms mein ek chunk bhejega (Real-time speed maintain karne ke liye)
+                }
             </script>
         </body>
         </html>
@@ -76,82 +98,45 @@ app.get('/', (req, res) => {
 });
 
 // -------------------------------------------------------------
-// 2. UPLOAD ENDPOINT (Auto-Cleanup ke sath)
+// 2. WEBSOCKET SERVER (Broadcaster se chunks receive karega)
 // -------------------------------------------------------------
-app.post('/upload', upload.single('audio'), (req, res) => {
-    if (!req.file) {
-        return res.status(400).send('No file uploaded.');
-    }
+wss.on('connection', (ws) => {
+    console.log('[Broadcaster] Connected to live stream feed.');
 
-    // AUTO-CLEANUP: Agar pehle se koi gaana folder mein hai, toh use delete kar do taaki storage full na ho!
-    fs.readdir(UPLOAD_DIR, (err, files) => {
-        if (!err) {
-            files.forEach(file => {
-                // Agar file naye upload ki hui file nahi hai, toh use uda do
-                if (file !== req.file.filename) {
-                    const oldFilePath = path.join(UPLOAD_DIR, file);
-                    fs.unlink(oldFilePath, (unlinkErr) => {
-                        if (unlinkErr) console.error("Error deleting old file:", unlinkErr);
-                        else console.log(`[Storage Cleared] Deleted old file: ${file}`);
-                    });
-                }
-            });
-        }
+    ws.on('message', (message) => {
+        // Jaise hi broadcaster se koi chunk aaye, sabhi active listeners ko bhej do
+        listeners.forEach(clientRes => {
+            clientRes.write(message);
+        });
     });
 
-    // Naye gaane ko current song set kar do
-    currentSongFile = path.join(UPLOAD_DIR, req.file.filename);
-    console.log(`[FM Radio] New song uploaded and active: ${req.file.originalname}`);
-
-    // Upload hone ke baad wapas panel par bhej do
-    res.redirect('/');
+    ws.on('close', () => {
+        console.log('[Broadcaster] Disconnected.');
+    });
 });
 
 // -------------------------------------------------------------
-// 3. SINGLE STREAM URL (Chunks ke through audio play hogi)
+// 3. LISTENER STREAM ROUTE (Friend yahan se chunks receive karega)
 // -------------------------------------------------------------
 app.get('/stream', (req, res) => {
-    if (!currentSongFile || !fs.existsSync(currentSongFile)) {
-        return res.status(404).send('No active song streaming right now.');
-    }
+    res.writeHead(200, {
+        'Content-Type': 'audio/mpeg',
+        'Transfer-Encoding': 'chunked',
+        'Access-Control-Allow-Origin': '*'
+    });
 
-    const stat = fs.statSync(currentSongFile);
-    const fileSize = stat.size;
-    const range = req.headers.range;
+    // Listener ko active list mein add kar liya
+    listeners.push(res);
+    console.log(`[Listener Connected] Total listeners: ${listeners.length}`);
 
-    if (range) {
-        const parts = range.replace(/bytes=/, "").split("-");
-        const start = parseInt(parts[0], 10);
-        const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-        const chunksize = (end - start) + 1;
-        const file = fs.createReadStream(currentSongFile, { start, end });
-        
-        res.writeHead(206, {
-            'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-            'Accept-Ranges': 'bytes',
-            'Content-Length': chunksize,
-            'Content-Type': 'audio/mpeg',
-        });
-        file.pipe(res);
-    } else {
-        res.writeHead(200, {
-            'Content-Length': fileSize,
-            'Content-Type': 'audio/mpeg',
-        });
-        fs.createReadStream(currentSongFile).pipe(res);
-    }
-});
-
-// Status check API
-app.get('/status', (req, res) => {
-    if (currentSongFile && fs.existsSync(currentSongFile)) {
-        res.json({ song: path.basename(currentSongFile) });
-    } else {
-        res.json({ song: null });
-    }
+    req.on('close', () => {
+        // Listener disconnect hone par list se hata do
+        listeners = listeners.filter(client => client !== res);
+        console.log(`[Listener Disconnected] Total listeners: ${listeners.length}`);
+    });
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`FM Radio Panel running on port ${PORT}`);
+server.listen(PORT, () => {
+    console.log(`Live Chunk Radio Server running on port ${PORT}`);
 });
