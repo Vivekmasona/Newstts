@@ -1,21 +1,17 @@
 const express = require('express');
-const http = require('http');
-const WebSocket = require('ws');
 const cors = require('cors');
+const http = require('http');
+const fetch = require('node-fetch');
 
 const app = express();
+app.use(express.json());
 app.use(cors());
 
-const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
-
-// Active listeners ki list jo /stream par connected hain
-let listeners = [];
-// Latest live audio chunk ko yaad rakhne ke liye taaki naya listener aate hi use pehla chunk mil jaye
-let latestChunk = null;
+// Default streaming URL (Aap koi bhi public mp3 link yahan set kar sakte hain)
+let currentAudioUrl = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3";
 
 // -------------------------------------------------------------
-// 1. BROADCASTER PANEL (Yahan se aap live audio bhejenge)
+// 1. ADMIN PANEL (Yahan bas naya audio link daalna hai)
 // -------------------------------------------------------------
 app.get('/', (req, res) => {
     res.send(`
@@ -24,129 +20,80 @@ app.get('/', (req, res) => {
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Instant Live Radio Broadcaster</title>
+            <title>24/7 Cloud Radio Station</title>
             <style>
                 body { font-family: Arial, sans-serif; background: #0f172a; color: #f8fafc; text-align: center; padding: 30px; }
-                .card { background: #1e293b; padding: 25px; border-radius: 12px; display: inline-block; width: 100%; max-width: 400px; box-shadow: 0 10px 25px rgba(0,0,0,0.4); }
+                .card { background: #1e293b; padding: 25px; border-radius: 12px; display: inline-block; width: 100%; max-width: 420px; box-shadow: 0 10px 25px rgba(0,0,0,0.4); }
                 input, button { margin: 10px 0; padding: 12px; font-size: 15px; border-radius: 6px; border: none; width: 100%; box-sizing: border-box; }
-                input[type="file"] { background: #334155; color: white; }
-                button { background: #ef4444; color: white; cursor: pointer; font-weight: bold; }
-                button.active { background: #22c55e; }
-                .status { margin-top: 15px; color: #38bdf8; font-weight: bold; font-size: 14px; }
+                input[type="text"] { background: #334155; color: white; border: 1px solid #475569; }
+                button { background: #3b82f6; color: white; cursor: pointer; font-weight: bold; }
+                button:hover { background: #2563eb; }
+                .status { margin-top: 15px; color: #22c55e; font-weight: bold; font-size: 14px; }
             </style>
         </head>
         <body>
             <div class="card">
-                <h2>🔴 Instant Live Radio</h2>
-                <p style="font-size: 13px; color: #94a3b8;">Zero Upload Wait - 1 Second Live Stream</p>
+                <h2>🌐 24/7 Cloud FM Radio</h2>
+                <p style="font-size: 13px; color: #94a3b8;">Bina upload kiye direct URL se 24/7 chalao</p>
                 
-                <input type="file" id="audioFile" accept="audio/*"><br>
-                <button id="liveBtn" onclick="toggleLive()">Start Live Broadcasting</button>
-                
-                <div class="status" id="statusMsg">Status: Disconnected</div>
+                <form action="/set-url" method="POST">
+                    <input type="text" name="audioUrl" placeholder="Audio ka direct MP3 URL yahan dalein..." required><br>
+                    <button type="submit">Update 24/7 Stream</button>
+                </form>
+
+                <div class="status">Status: 🟢 24/7 Server Running Active</div>
                 
                 <br><hr style="border: 0.5px solid #334155;"><br>
                 <h3 style="font-size: 14px;">Friend ka Permanent Listener URL:</h3>
-                <input type="text" value="${req.protocol}://${req.get('host')}/stream" readonly style="background: #0f172a; color: #38bdf8; text-align: center; border: 1px solid #334155;">
+                <input type="text" value="${req.protocol}://${req.get('host')}/stream" readonly style="background: #0f172a; color: #38bdf8; text-align: center;">
             </div>
-
-            <script>
-                let ws;
-                let isLive = false;
-                let intervalId;
-
-                function connectWS() {
-                    const protocol = location.protocol === 'https:' ? 'wss://' : 'ws://';
-                    ws = new WebSocket(protocol + location.host);
-                    
-                    ws.onopen = () => document.getElementById('statusMsg').innerText = "Status: Ready to Go Live";
-                    ws.onclose = () => {
-                        document.getElementById('statusMsg').innerText = "Status: Reconnecting...";
-                        setTimeout(connectWS, 2000);
-                    };
-                }
-                connectWS();
-
-                async function toggleLive() {
-                    const fileInput = document.getElementById('audioFile');
-                    if (fileInput.files.length === 0) {
-                        alert("Pehle koi audio file select karo!");
-                        return;
-                    }
-
-                    const file = fileInput.files[0];
-                    const btn = document.getElementById('liveBtn');
-
-                    if (!isLive) {
-                        isLive = true;
-                        btn.innerText = "Stop Live Stream";
-                        btn.classList.add('active');
-                        document.getElementById('statusMsg').innerText = "Status: 🔴 LIVE STREAMING...";
-
-                        // Audio ko Web Audio API se read karke real-time chunks bhejna
-                        const arrayBuffer = await file.arrayBuffer();
-                        const CHUNK_SIZE = 16 * 1024; // 16KB chhote chunks taaki 1 second mein pahunche
-                        let offset = 0;
-
-                        intervalId = setInterval(() => {
-                            if (offset >= arrayBuffer.byteLength) {
-                                offset = 0; // Loop wapas shuru kar dega radio ki tarah
-                            }
-
-                            const chunk = arrayBuffer.slice(offset, offset + CHUNK_SIZE);
-                            if (ws.readyState === WebSocket.OPEN) {
-                                ws.send(chunk);
-                            }
-                            offset += CHUNK_SIZE;
-                        }, 100); // Har 100ms mein live chunk stream hoga
-
-                    } else {
-                        isLive = false;
-                        clearInterval(intervalId);
-                        btn.innerText = "Start Live Broadcasting";
-                        btn.classList.remove('active');
-                        document.getElementById('statusMsg').innerText = "Status: Stopped";
-                    }
-                }
-            </script>
         </body>
         </html>
     `);
 });
 
 // -------------------------------------------------------------
-// 2. WEBSOCKET REAL-TIME RELAY
+// 2. UPDATE STREAM URL ROUTE
 // -------------------------------------------------------------
-wss.on('connection', (ws) => {
-    ws.on('message', (message) => {
-        latestChunk = message;
-        // Jaise hi broadcaster se chunk aaye, sabhi active listeners ko turant bhej do
-        listeners.forEach(clientRes => {
-            clientRes.write(message);
-        });
-    });
+app.post('/set-url', (req, res) => {
+    const { audioUrl } = req.body;
+    if (audioUrl) {
+        currentAudioUrl = audioUrl;
+        console.log(`[Cloud Radio] Stream URL updated to: ${audioUrl}`);
+    }
+    res.redirect('/');
 });
 
 // -------------------------------------------------------------
-// 3. INSTANT LISTENER STREAM ROUTE
+// 3. 24/7 STABLE PROXY STREAM FOR LISTENERS
 // -------------------------------------------------------------
-app.get('/stream', (req, res) => {
-    res.writeHead(200, {
-        'Content-Type': 'audio/mpeg',
-        'Transfer-Encoding': 'chunked',
-        'Access-Control-Allow-Origin': '*'
-    });
+app.get('/stream', async (req, res) => {
+    try {
+        // Server khud cloud se audio stream fetch karke listener ko relay karega
+        const response = await fetch(currentAudioUrl);
+        
+        if (!response.ok) {
+            return res.status(404).send('Audio source not reachable.');
+        }
 
-    listeners.push(res);
-    console.log(`[Listener Connected] Total listeners: ${listeners.length}`);
+        res.setHeader('Content-Type', response.headers.get('content-type') || 'audio/mpeg');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Cache-Control', 'no-cache');
 
-    req.on('close', () => {
-        listeners = listeners.filter(client => client !== res);
-        console.log(`[Listener Disconnected] Total listeners: ${listeners.length}`);
-    });
+        // External stream ko pipe kar dena taಕಿ 24/7 bina ruke chalta rahe
+        response.body.pipe(res);
+
+        response.body.on('error', (err) => {
+            console.error('Stream relay error:', err);
+            res.end();
+        });
+
+    } catch (e) {
+        res.status(500).send('Error streaming audio: ' + e.message);
+    }
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log(`Instant Live Radio running on port ${PORT}`);
+app.listen(PORT, () => {
+    console.log(`24/7 Cloud Radio running on port ${PORT}`);
 });
