@@ -1,19 +1,21 @@
 const express = require('express');
-const multer = require('multer');
+const http = require('http');
+const WebSocket = require('ws');
 const cors = require('cors');
 
 const app = express();
 app.use(cors());
 
-// Memory Storage (RAM) - Storage Full Nahi Hoga
-const upload = multer({ storage: multer.memoryStorage() });
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
 
-let activeAudioBuffer = null;
-let activeMimeType = 'audio/mpeg';
-let songTimestamp = Date.now();
+// Active listeners ki list jo /stream par connected hain
+let listeners = [];
+// Latest live audio chunk ko yaad rakhne ke liye taaki naya listener aate hi use pehla chunk mil jaye
+let latestChunk = null;
 
 // -------------------------------------------------------------
-// 1. ADMIN PANEL & AUTO-RECONNECTING PLAYER
+// 1. BROADCASTER PANEL (Yahan se aap live audio bhejenge)
 // -------------------------------------------------------------
 app.get('/', (req, res) => {
     res.send(`
@@ -22,107 +24,129 @@ app.get('/', (req, res) => {
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Stable HLS FM Radio Station</title>
+            <title>Instant Live Radio Broadcaster</title>
             <style>
                 body { font-family: Arial, sans-serif; background: #0f172a; color: #f8fafc; text-align: center; padding: 30px; }
-                .card { background: #1e293b; padding: 25px; border-radius: 12px; display: inline-block; width: 100%; max-width: 420px; box-shadow: 0 10px 25px rgba(0,0,0,0.4); }
+                .card { background: #1e293b; padding: 25px; border-radius: 12px; display: inline-block; width: 100%; max-width: 400px; box-shadow: 0 10px 25px rgba(0,0,0,0.4); }
                 input, button { margin: 10px 0; padding: 12px; font-size: 15px; border-radius: 6px; border: none; width: 100%; box-sizing: border-box; }
                 input[type="file"] { background: #334155; color: white; }
-                button { background: #22c55e; color: black; cursor: pointer; font-weight: bold; }
-                button:hover { background: #16a34a; }
+                button { background: #ef4444; color: white; cursor: pointer; font-weight: bold; }
+                button.active { background: #22c55e; }
                 .status { margin-top: 15px; color: #38bdf8; font-weight: bold; font-size: 14px; }
             </style>
         </head>
         <body>
             <div class="card">
-                <h2>📻 Auto-Reconnect FM Station</h2>
-                <p style="font-size: 13px; color: #94a3b8;">HLS Segmented Protocol (Zero Disconnect)</p>
+                <h2>🔴 Instant Live Radio</h2>
+                <p style="font-size: 13px; color: #94a3b8;">Zero Upload Wait - 1 Second Live Stream</p>
                 
-                <form action="/upload" method="POST" enctype="multipart/form-data">
-                    <input type="file" name="audio" accept="audio/*" required><br>
-                    <button type="submit">Upload & Broadcast Live</button>
-                </form>
-
-                <div class="status">
-                    Status: ${activeAudioBuffer ? '🟢 Stream Live' : '🔴 Server Ready (No Audio)'}
-                </div>
+                <input type="file" id="audioFile" accept="audio/*"><br>
+                <button id="liveBtn" onclick="toggleLive()">Start Live Broadcasting</button>
+                
+                <div class="status" id="statusMsg">Status: Disconnected</div>
                 
                 <br><hr style="border: 0.5px solid #334155;"><br>
                 <h3 style="font-size: 14px;">Friend ka Permanent Listener URL:</h3>
                 <input type="text" value="${req.protocol}://${req.get('host')}/stream" readonly style="background: #0f172a; color: #38bdf8; text-align: center; border: 1px solid #334155;">
             </div>
+
+            <script>
+                let ws;
+                let isLive = false;
+                let intervalId;
+
+                function connectWS() {
+                    const protocol = location.protocol === 'https:' ? 'wss://' : 'ws://';
+                    ws = new WebSocket(protocol + location.host);
+                    
+                    ws.onopen = () => document.getElementById('statusMsg').innerText = "Status: Ready to Go Live";
+                    ws.onclose = () => {
+                        document.getElementById('statusMsg').innerText = "Status: Reconnecting...";
+                        setTimeout(connectWS, 2000);
+                    };
+                }
+                connectWS();
+
+                async function toggleLive() {
+                    const fileInput = document.getElementById('audioFile');
+                    if (fileInput.files.length === 0) {
+                        alert("Pehle koi audio file select karo!");
+                        return;
+                    }
+
+                    const file = fileInput.files[0];
+                    const btn = document.getElementById('liveBtn');
+
+                    if (!isLive) {
+                        isLive = true;
+                        btn.innerText = "Stop Live Stream";
+                        btn.classList.add('active');
+                        document.getElementById('statusMsg').innerText = "Status: 🔴 LIVE STREAMING...";
+
+                        // Audio ko Web Audio API se read karke real-time chunks bhejna
+                        const arrayBuffer = await file.arrayBuffer();
+                        const CHUNK_SIZE = 16 * 1024; // 16KB chhote chunks taaki 1 second mein pahunche
+                        let offset = 0;
+
+                        intervalId = setInterval(() => {
+                            if (offset >= arrayBuffer.byteLength) {
+                                offset = 0; // Loop wapas shuru kar dega radio ki tarah
+                            }
+
+                            const chunk = arrayBuffer.slice(offset, offset + CHUNK_SIZE);
+                            if (ws.readyState === WebSocket.OPEN) {
+                                ws.send(chunk);
+                            }
+                            offset += CHUNK_SIZE;
+                        }, 100); // Har 100ms mein live chunk stream hoga
+
+                    } else {
+                        isLive = false;
+                        clearInterval(intervalId);
+                        btn.innerText = "Start Live Broadcasting";
+                        btn.classList.remove('active');
+                        document.getElementById('statusMsg').innerText = "Status: Stopped";
+                    }
+                }
+            </script>
         </body>
         </html>
     `);
 });
 
 // -------------------------------------------------------------
-// 2. MEMORY UPLOAD & SEGMENTATION PREP
+// 2. WEBSOCKET REAL-TIME RELAY
 // -------------------------------------------------------------
-app.post('/upload', upload.single('audio'), (req, res) => {
-    if (!req.file) {
-        return res.status(400).send('No file uploaded.');
-    }
-
-    // Purana data RAM se clear karke naya song buffer update
-    activeAudioBuffer = req.file.buffer;
-    activeMimeType = req.file.mimetype || 'audio/mpeg';
-    songTimestamp = Date.now();
-
-    console.log(`[HLS Broadcast] New Track Loaded: ${req.file.originalname} (${activeAudioBuffer.length} bytes)`);
-    res.redirect('/');
+wss.on('connection', (ws) => {
+    ws.on('message', (message) => {
+        latestChunk = message;
+        // Jaise hi broadcaster se chunk aaye, sabhi active listeners ko turant bhej do
+        listeners.forEach(clientRes => {
+            clientRes.write(message);
+        });
+    });
 });
 
 // -------------------------------------------------------------
-// 3. STABLE HTTP SEGMENTED STREAM ROUTE
+// 3. INSTANT LISTENER STREAM ROUTE
 // -------------------------------------------------------------
 app.get('/stream', (req, res) => {
-    if (!activeAudioBuffer) {
-        return res.status(404).send('No active radio stream currently live.');
-    }
+    res.writeHead(200, {
+        'Content-Type': 'audio/mpeg',
+        'Transfer-Encoding': 'chunked',
+        'Access-Control-Allow-Origin': '*'
+    });
 
-    const fileSize = activeAudioBuffer.length;
-    const range = req.headers.range;
+    listeners.push(res);
+    console.log(`[Listener Connected] Total listeners: ${listeners.length}`);
 
-    // Browser reconnection headers set karein taaki connection freeze na ho
-    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-
-    if (range) {
-        const parts = range.replace(/bytes=/, "").split("-");
-        const start = parseInt(parts[0], 10);
-        const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-        const chunksize = (end - start) + 1;
-        
-        const chunk = activeAudioBuffer.subarray(start, end + 1);
-
-        res.writeHead(206, {
-            'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-            'Accept-Ranges': 'bytes',
-            'Content-Length': chunksize,
-            'Content-Type': activeMimeType,
-        });
-        res.end(chunk);
-    } else {
-        res.writeHead(200, {
-            'Content-Length': fileSize,
-            'Content-Type': activeMimeType,
-        });
-        res.end(activeAudioBuffer);
-    }
-});
-
-// Endpoint to check status without breaking audio
-app.get('/status', (req, res) => {
-    res.json({
-        active: activeAudioBuffer !== null,
-        timestamp: songTimestamp
+    req.on('close', () => {
+        listeners = listeners.filter(client => client !== res);
+        console.log(`[Listener Disconnected] Total listeners: ${listeners.length}`);
     });
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Auto-Reconnect HLS Radio Server active on port ${PORT}`);
+server.listen(PORT, () => {
+    console.log(`Instant Live Radio running on port ${PORT}`);
 });
